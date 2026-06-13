@@ -122,12 +122,19 @@ PRIVATE_KEY=<base58_private_key_lo>
 ### Knob penting buat pemula (mulai KECIL):
 
 ```env
-ORDER_SIZE_USD=50        # mulai dari kecil! per-side order notional
+SYMBOLS=BTC,ETH,SOL      # market yang dijalanin bareng dalam 1 proses
+MARGIN_PER_ENTRY_USD=2   # margin per entry (USD). Notional = margin / imf, auto per-coin
 MAX_INVENTORY_USD=200    # posisi maks yang lo toleransi
 MAX_DRAWDOWN_USD=10      # KILL SWITCH: stop + cancel kalau rugi sesi capai ini
 SPREAD_BPS=8             # half-spread dari fair price
 TAKE_PROFIT_BPS=3        # half-spread di close mode (harus nutup fee)
 ```
+
+**Soal size & leverage:** lo cukup set `MARGIN_PER_ENTRY_USD` (default $2). Bot
+auto-hitung notional order per market dari `imf` (initial-margin fraction):
+`notional = margin / imf`. Contoh imf BTC 2% (50x) → $2 = $100 notional; imf SOL
+5% (20x) → $2 = $40 notional. Bot **gak** ngeset leverage — 01.xyz cross-margin,
+leverage fixed per market (maks = 1/imf), ikut setting akun lo apa adanya.
 
 Default lain udah sane, biarin aja sampe lo paham. Detail tiap knob ada di `.env.example`.
 
@@ -136,10 +143,13 @@ Default lain udah sane, biarin aja sampe lo paham. Detail tiap knob ada di `.env
 ## 7. Jalankan LIVE (taruh order beneran)
 
 ```bash
-npm run bot -- BTC
+npm run bot                 # default BTC,ETH,SOL bareng (1 proses)
+npm run bot -- BTC ETH SOL  # pilih sendiri
+npm run bot -- BTC          # 1 market aja
 ```
 
-- Ganti `BTC` dengan simbol yang mau lo MM-in.
+- Multi-symbol jalan bareng dalam **1 proses**, share 1 wallet session.
+- `Ctrl+C` cancel SEMUA order di semua market, exit aman.
 - Bot bakal konek wallet → fund → mulai quoting bid/ask.
 - Status box update real-time (kayak demo di step 4, tapi ini beneran).
 
@@ -210,8 +220,8 @@ npm install
 npm run typecheck          # harus 0 error
 npm run logdemo            # lihat tampilan (aman, no order)
 npm run backtest -- BTC 1500 200   # test dulu
-cp .env.example .env       # isi PRIVATE_KEY + size kecil
-npm run bot -- BTC         # LIVE — Ctrl+C buat stop aman
+cp .env.example .env       # isi PRIVATE_KEY + margin kecil
+npm run bot                # LIVE BTC,ETH,SOL — Ctrl+C buat stop aman
 ```
 
-**Mulai dengan `ORDER_SIZE_USD` kecil. Naikin pelan-pelan kalau udah paham perilakunya.**
+**Mulai dengan `MARGIN_PER_ENTRY_USD` kecil (default $2). Naikin pelan-pelan kalau udah paham perilakunya.**

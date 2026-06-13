@@ -7,7 +7,8 @@ export interface MarketMakerConfig {
 	// --- Core quoting ---
 	readonly spreadBps: number; // Base spread from fair price (bps)
 	readonly takeProfitBps: number; // Spread in close mode (bps) — MUST cover fees
-	readonly orderSizeUsd: number; // Order size in USD per side
+	readonly orderSizeUsd: number; // Fallback order size in USD per side (used if marginPerEntryUsd<=0 or imf missing)
+	readonly marginPerEntryUsd: number; // Target margin (collateral) committed per entry; notional = margin/imf. Overrides orderSizeUsd when > 0.
 	readonly warmupSeconds: number; // Min samples before quoting
 	readonly updateThrottleMs: number; // Min interval between quote updates
 	readonly orderSyncIntervalMs: number; // Interval for syncing orders from API
@@ -59,7 +60,8 @@ export function loadConfig(symbol: string): MarketMakerConfig {
 		// Core
 		spreadBps: num("SPREAD_BPS", 8),
 		takeProfitBps: num("TAKE_PROFIT_BPS", 3), // was 0.1 — too small to cover fees
-		orderSizeUsd: num("ORDER_SIZE_USD", 200), // was 3000 — saner default
+		orderSizeUsd: num("ORDER_SIZE_USD", 200), // fallback only; used when MARGIN_PER_ENTRY_USD<=0
+		marginPerEntryUsd: num("MARGIN_PER_ENTRY_USD", 2), // default $2 margin/entry; notional auto-derived from market imf
 		warmupSeconds: num("WARMUP_SECONDS", 10),
 		updateThrottleMs: num("UPDATE_THROTTLE_MS", 100),
 		orderSyncIntervalMs: num("ORDER_SYNC_INTERVAL_MS", 3000),
@@ -93,3 +95,38 @@ export function loadConfig(symbol: string): MarketMakerConfig {
 // Back-compat export (symbol injected by caller)
 export const DEFAULT_CONFIG: Omit<MarketMakerConfig, "symbol"> =
 	loadConfig("__DEFAULT__");
+
+// Parse the list of symbols to market-make. Priority:
+//   1) explicit CLI args (space/comma separated), e.g. `bot BTC ETH SOL`
+//   2) SYMBOLS env (comma separated), e.g. SYMBOLS=BTC,ETH,SOL
+//   3) single SYMBOL env
+//   4) default BTC,ETH,SOL
+// Symbols are upper-cased and de-duplicated, order preserved.
+export function parseSymbols(cliArgs: string[] = []): string[] {
+	const fromCli = cliArgs
+		.flatMap((a) => a.split(","))
+		.map((s) => s.trim())
+		.filter(Boolean);
+
+	let raw: string[];
+	if (fromCli.length > 0) {
+		raw = fromCli;
+	} else if (process.env.SYMBOLS && process.env.SYMBOLS.trim() !== "") {
+		raw = process.env.SYMBOLS.split(",");
+	} else if (process.env.SYMBOL && process.env.SYMBOL.trim() !== "") {
+		raw = [process.env.SYMBOL];
+	} else {
+		raw = ["BTC", "ETH", "SOL"];
+	}
+
+	const seen = new Set<string>();
+	const out: string[] = [];
+	for (const s of raw) {
+		const sym = s.trim().toUpperCase();
+		if (sym && !seen.has(sym)) {
+			seen.add(sym);
+			out.push(sym);
+		}
+	}
+	return out;
+}

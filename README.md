@@ -50,11 +50,23 @@ Outputs fills, realized PnL, max drawdown, and whether the risk halt engaged. Tu
 
 ## Run live
 
+Multi-symbol by default — runs **BTC, ETH, SOL** in a single process sharing one
+wallet session (01.xyz cross-margin account):
+
 ```bash
-npm run bot -- BTC
+npm run bot                 # SYMBOLS env, or default BTC ETH SOL
+npm run bot -- BTC ETH SOL  # explicit list
+npm run bot -- BTC          # single market
+SYMBOLS=BTC,ETH npm run bot # via env
 ```
 
-`Ctrl+C` cancels all open orders and exits cleanly.
+**Sizing:** each entry commits `MARGIN_PER_ENTRY_USD` (default **$2**) of margin.
+The order notional is auto-derived per market from its initial-margin fraction
+(`imf`): `notional = margin / imf`. Example: imf 2% (50x) → $2 margin = $100
+notional; imf 5% (20x) → $2 margin = $40 notional. The bot does **not** set
+leverage — 01.xyz is cross-margin and leverage is fixed per market (max = 1/imf).
+
+`Ctrl+C` cancels all open orders across every market and exits cleanly.
 
 ## Run 24/7 with Docker
 
@@ -88,7 +100,9 @@ Every knob is an env var — see [`.env.example`](.env.example). Key safety ones
 
 - `MAX_DRAWDOWN_USD` — your hard stop. Start small.
 - `MAX_INVENTORY_USD` — biggest position you'll tolerate.
-- `ORDER_SIZE_USD` — per-side notional. Start tiny.
+- `MARGIN_PER_ENTRY_USD` — margin committed per entry (default $2). Notional auto-derived per market via `notional = margin / imf`.
+- `ORDER_SIZE_USD` — fallback per-side notional, used only when `MARGIN_PER_ENTRY_USD=0`.
+- `SYMBOLS` — comma-separated markets to run in one process (default `BTC,ETH,SOL`).
 
 ## Risk disclaimer
 

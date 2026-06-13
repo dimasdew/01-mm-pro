@@ -9,12 +9,7 @@
 
 import { log } from "../../utils/logger.js";
 
-export type HaltReason =
-	| "drawdown"
-	| "stale-feed"
-	| "errors"
-	| "manual"
-	| null;
+export type HaltReason = "drawdown" | "stale-feed" | "errors" | "manual" | null;
 
 export interface RiskConfig {
 	readonly maxInventoryUsd: number;
@@ -44,7 +39,8 @@ export class RiskManager {
 		const prevBase = this.invBase;
 		const newBase = prevBase + signed;
 
-		const sameDirection = prevBase === 0 || Math.sign(prevBase) === Math.sign(signed);
+		const sameDirection =
+			prevBase === 0 || Math.sign(prevBase) === Math.sign(signed);
 
 		if (sameDirection) {
 			// Adding to position: update VWAP entry

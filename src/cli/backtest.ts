@@ -9,9 +9,9 @@
 // Usage: npm run backtest -- BTC 1000 200
 //   args: <symbol> <days*1440 bars max via limit> <orderSizeUsd>
 
-import { VolatilityEstimator } from "../pricing/volatility.js";
-import { RiskManager } from "../bots/mm/risk.js";
 import { loadConfig } from "../bots/mm/config.js";
+import { RiskManager } from "../bots/mm/risk.js";
+import { VolatilityEstimator } from "../pricing/volatility.js";
 
 interface Kline {
 	open: number;
@@ -109,8 +109,7 @@ function simulate(
 		// Process the side that improves inventory first to be conservative.
 		const tryFill = (side: "bid" | "ask", price: number, size: number) => {
 			if (size <= 0) return;
-			const filled =
-				side === "bid" ? bar.low <= price : bar.high >= price;
+			const filled = side === "bid" ? bar.low <= price : bar.high >= price;
 			if (!filled) return;
 
 			fills++;
@@ -121,7 +120,9 @@ function simulate(
 			const sameDir = prev === 0 || Math.sign(prev) === Math.sign(signed);
 			if (sameDir) {
 				const tot = Math.abs(prev) + Math.abs(signed);
-				if (tot > 0) avgEntry = (Math.abs(prev) * avgEntry + Math.abs(signed) * price) / tot;
+				if (tot > 0)
+					avgEntry =
+						(Math.abs(prev) * avgEntry + Math.abs(signed) * price) / tot;
 			} else {
 				const closedAbs = Math.min(Math.abs(prev), Math.abs(signed));
 				const dir = Math.sign(prev);

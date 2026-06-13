@@ -22,7 +22,7 @@ if (typeof proto.toHex !== "function") {
 
 const ctor = Uint8Array as unknown as HexCapableUint8ArrayCtor;
 if (typeof ctor.fromHex !== "function") {
-	ctor.fromHex = function (hex: string): Uint8Array {
+	ctor.fromHex = (hex: string): Uint8Array => {
 		const clean = hex.startsWith("0x") ? hex.slice(2) : hex;
 		const len = clean.length / 2;
 		const arr = new Uint8Array(len);

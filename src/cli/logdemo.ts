@@ -13,7 +13,12 @@ const risk = new RiskManager({
 
 const SYMBOL = "BTC-PERP";
 
-function statusNow(mark: number, bid: number | null, ask: number | null, vol: number) {
+function statusNow(
+	mark: number,
+	bid: number | null,
+	ask: number | null,
+	vol: number,
+) {
 	const s = risk.getStats(mark);
 	log.status({
 		symbol: SYMBOL,

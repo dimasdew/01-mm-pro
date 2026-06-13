@@ -18,13 +18,18 @@ import { VolatilityEstimator } from "../../pricing/volatility.js";
 import { AccountStream, type FillEvent } from "../../sdk/account.js";
 import { createZoClient, type ZoClient } from "../../sdk/client.js";
 import { ZoOrderbookStream } from "../../sdk/orderbook.js";
-import { type CachedOrder, cancelOrders, flattenPosition, updateQuotes } from "../../sdk/orders.js";
+import {
+	type CachedOrder,
+	cancelOrders,
+	flattenPosition,
+	updateQuotes,
+} from "../../sdk/orders.js";
 import type { MidPrice } from "../../types.js";
 import { log } from "../../utils/logger.js";
 import type { MarketMakerConfig } from "./config.js";
 import { type PositionConfig, PositionTracker } from "./position.js";
-import { RiskManager } from "./risk.js";
 import { Quoter } from "./quoter.js";
+import { RiskManager } from "./risk.js";
 
 export type { MarketMakerConfig } from "./config.js";
 
@@ -72,21 +77,32 @@ export class MarketMaker {
 	private lastLoggedSampleCount = -1;
 	private activeOrders: CachedOrder[] = [];
 	private isUpdating = false;
-	private throttledUpdate: DebouncedFunc<(fairPrice: number) => Promise<void>> | null =
-		null;
+	private throttledUpdate: DebouncedFunc<
+		(fairPrice: number) => Promise<void>
+	> | null = null;
 	private statusInterval: ReturnType<typeof setInterval> | null = null;
 	private orderSyncInterval: ReturnType<typeof setInterval> | null = null;
+
+	// effective per-side order notional (USD), derived from marginPerEntryUsd / imf
+	private effectiveOrderSizeUsd: number;
 
 	constructor(
 		private readonly config: MarketMakerConfig,
 		private readonly privateKey: string,
-	) {}
+		// When provided, this MarketMaker shares an externally-owned client
+		// (multi-symbol orchestration). It then does NOT own connect/exit lifecycle
+		// for the wallet session and must not call process.exit on shutdown.
+		private readonly sharedClient: ZoClient | null = null,
+	) {
+		this.effectiveOrderSizeUsd = config.orderSizeUsd;
+	}
 
 	private requireClient(): ZoClient {
 		if (!this.client) throw new Error("Client not initialized");
 		return this.client;
 	}
 
+	// Standalone run: owns client, signal handlers, and warmup wait.
 	async run(): Promise<void> {
 		log.banner();
 		await this.initialize();
@@ -98,6 +114,21 @@ export class MarketMaker {
 		await this.waitForever();
 	}
 
+	// Orchestrated start: client is injected, no signal handlers, no waitForever.
+	// The orchestrator owns the process lifecycle and calls stop() on shutdown.
+	async start(): Promise<void> {
+		await this.initialize();
+		this.setupEventHandlers();
+		await this.syncInitialOrders();
+		this.startIntervals();
+	}
+
+	// Graceful per-instance teardown used by the orchestrator. Cancels resting
+	// orders and tears down feeds/intervals but never exits the process.
+	async stop(): Promise<void> {
+		await this.teardown();
+	}
+
 	private async initialize(): Promise<void> {
 		this.throttledUpdate = throttle(
 			(fairPrice: number) => this.executeUpdate(fairPrice),
@@ -105,7 +136,7 @@ export class MarketMaker {
 			{ leading: true, trailing: true },
 		);
 
-		this.client = await createZoClient(this.privateKey);
+		this.client = this.sharedClient ?? (await createZoClient(this.privateKey));
 		const { nord } = this.client;
 
 		const market = nord.markets.find((m) =>
@@ -120,6 +151,26 @@ export class MarketMaker {
 		this.marketId = market.marketId;
 		this.marketSymbol = market.symbol;
 		this.priceDecimals = market.priceDecimals;
+
+		// --- Auto-size from target margin per entry ---
+		// 01 Exchange is cross-margin; "leverage" is fixed per-market via the
+		// initial-margin fraction (imf). Max leverage = 1 / imf. The notional we
+		// can open per `marginPerEntryUsd` of margin is margin / imf.
+		// If marginPerEntryUsd is set (> 0), it OVERRIDES orderSizeUsd so the user
+		// controls capital-at-risk directly regardless of which coin it is.
+		const imf =
+			typeof market.imf === "number" && market.imf > 0 ? market.imf : null;
+		const maxLeverage = imf ? 1 / imf : null;
+		if (this.config.marginPerEntryUsd > 0 && imf) {
+			this.effectiveOrderSizeUsd = this.config.marginPerEntryUsd / imf;
+		} else {
+			this.effectiveOrderSizeUsd = this.config.orderSizeUsd;
+		}
+		log.info(
+			`[${this.marketSymbol}] imf=${imf ?? "n/a"} | maxLev=${
+				maxLeverage ? `${maxLeverage.toFixed(1)}x` : "n/a"
+			} | margin/entry=$${this.config.marginPerEntryUsd} | order notional=$${this.effectiveOrderSizeUsd.toFixed(2)}`,
+		);
 
 		const binanceSymbol = deriveBinanceSymbol(market.symbol);
 		this.logConfig(binanceSymbol);
@@ -148,7 +199,7 @@ export class MarketMaker {
 			sizeDecimals: market.sizeDecimals,
 			baseSpreadBps: this.config.spreadBps,
 			takeProfitBps: this.config.takeProfitBps,
-			orderSizeUsd: this.config.orderSizeUsd,
+			orderSizeUsd: this.effectiveOrderSizeUsd,
 			maxInventoryUsd: this.config.maxInventoryUsd,
 			inventorySkewBps: this.config.inventorySkewBps,
 			dynamicSpread: this.config.dynamicSpread,
@@ -204,7 +255,10 @@ export class MarketMaker {
 		this.vol?.addSample(binancePrice.mid);
 
 		const zoPrice = this.orderbookStream?.getMidPrice();
-		if (zoPrice && Math.abs(binancePrice.timestamp - zoPrice.timestamp) < 1000) {
+		if (
+			zoPrice &&
+			Math.abs(binancePrice.timestamp - zoPrice.timestamp) < 1000
+		) {
 			this.fairPriceCalc?.addSample(zoPrice.mid, binancePrice.mid);
 		}
 
@@ -252,7 +306,9 @@ export class MarketMaker {
 		const { user, accountId } = this.requireClient();
 		await user.fetchInfo();
 		const existingOrders = (user.orders[accountId] ?? []) as ApiOrder[];
-		const marketOrders = existingOrders.filter((o) => o.marketId === this.marketId);
+		const marketOrders = existingOrders.filter(
+			(o) => o.marketId === this.marketId,
+		);
 		this.activeOrders = mapApiOrdersToCached(marketOrders);
 		if (this.activeOrders.length > 0) {
 			log.info(`Synced ${this.activeOrders.length} existing orders`);
@@ -262,7 +318,10 @@ export class MarketMaker {
 
 	private startIntervals(): void {
 		const { user, accountId } = this.requireClient();
-		this.statusInterval = setInterval(() => this.logStatus(), this.config.statusIntervalMs);
+		this.statusInterval = setInterval(
+			() => this.logStatus(),
+			this.config.statusIntervalMs,
+		);
 		this.orderSyncInterval = setInterval(
 			() => this.syncOrders(user, accountId),
 			this.config.orderSyncIntervalMs,
@@ -277,6 +336,13 @@ export class MarketMaker {
 
 	private async shutdown(): Promise<void> {
 		log.shutdown();
+		await this.teardown();
+		process.exit(0);
+	}
+
+	// Tears down all per-instance resources and cancels resting orders.
+	// Does NOT touch the wallet session (shared client) or the process.
+	private async teardown(): Promise<void> {
 		this.isRunning = false;
 		this.throttledUpdate?.cancel();
 		this.positionTracker?.stopSync();
@@ -298,15 +364,16 @@ export class MarketMaker {
 		try {
 			if (this.activeOrders.length > 0 && this.client) {
 				await cancelOrders(this.client.user, this.activeOrders);
-				log.info(`Cancelled ${this.activeOrders.length} orders. Goodbye!`);
+				log.info(
+					`[${this.marketSymbol}] Cancelled ${this.activeOrders.length} orders.`,
+				);
 				this.activeOrders = [];
 			} else {
-				log.info("No active orders. Goodbye!");
+				log.info(`[${this.marketSymbol}] No active orders to cancel.`);
 			}
 		} catch (err) {
 			log.error("Shutdown error:", err);
 		}
-		process.exit(0);
 	}
 
 	private async waitForever(): Promise<void> {
@@ -321,7 +388,9 @@ export class MarketMaker {
 		if (this.flattening) return;
 		this.flattening = true;
 
-		log.error("⚠️ Emergency flatten: risk halt — closing position via reduce-only IOC.");
+		log.error(
+			"⚠️ Emergency flatten: risk halt — closing position via reduce-only IOC.",
+		);
 
 		try {
 			if (!this.client || !this.positionTracker) {
@@ -461,7 +530,7 @@ export class MarketMaker {
 			Binance: binanceSymbol,
 			Spread: `${this.config.spreadBps} bps (dyn: ${this.config.dynamicSpread})`,
 			"Take Profit": `${this.config.takeProfitBps} bps`,
-			"Order Size": `$${this.config.orderSizeUsd}`,
+			"Order Size": `$${this.effectiveOrderSizeUsd.toFixed(2)} (margin/entry $${this.config.marginPerEntryUsd})`,
 			"Close Mode": `>=$${this.config.closeThresholdUsd}`,
 			"Max Inventory": `$${this.config.maxInventoryUsd}`,
 			"Max Drawdown": `$${this.config.maxDrawdownUsd}`,
@@ -487,7 +556,9 @@ export class MarketMaker {
 			.fetchInfo()
 			.then(() => {
 				const apiOrders = (user.orders[accountId] ?? []) as ApiOrder[];
-				const marketOrders = apiOrders.filter((o) => o.marketId === this.marketId);
+				const marketOrders = apiOrders.filter(
+					(o) => o.marketId === this.marketId,
+				);
 				this.activeOrders = mapApiOrdersToCached(marketOrders);
 			})
 			.catch((err) => log.error("Order sync error:", err));
@@ -502,8 +573,10 @@ export class MarketMaker {
 		const stats = this.risk.getStats(mark);
 		const bids = this.activeOrders.filter((o) => o.side === "bid");
 		const asks = this.activeOrders.filter((o) => o.side === "ask");
-		const bestBid = bids.length > 0 ? Math.max(...bids.map((o) => o.price.toNumber())) : null;
-		const bestAsk = asks.length > 0 ? Math.min(...asks.map((o) => o.price.toNumber())) : null;
+		const bestBid =
+			bids.length > 0 ? Math.max(...bids.map((o) => o.price.toNumber())) : null;
+		const bestAsk =
+			asks.length > 0 ? Math.min(...asks.map((o) => o.price.toNumber())) : null;
 
 		log.status({
 			symbol: this.marketSymbol,

@@ -16,8 +16,7 @@ const LEVEL_PRIORITY: Record<LogLevel, number> = {
 };
 
 // ── color support ───────────────────────────────────────────────
-const useColor =
-	!process.env.NO_COLOR && (process.stdout.isTTY ?? false);
+const useColor = !process.env.NO_COLOR && (process.stdout.isTTY ?? false);
 
 const c = {
 	reset: useColor ? "\x1b[0m" : "",
@@ -175,9 +174,13 @@ export const log = {
 	},
 
 	fill(side: "buy" | "sell", price: number, size: number): void {
-		const arrow = side === "buy" ? paint(c.green, "▲ BUY ") : paint(c.red, "▼ SELL");
+		const arrow =
+			side === "buy" ? paint(c.green, "▲ BUY ") : paint(c.red, "▼ SELL");
 		outputFn(
-			line("info", `${tag("FILL", c.bold)} ${arrow} ${size} @ $${price.toFixed(2)}`),
+			line(
+				"info",
+				`${tag("FILL", c.bold)} ${arrow} ${size} @ $${price.toFixed(2)}`,
+			),
 		);
 	},
 
@@ -237,6 +240,8 @@ export const log = {
 	},
 
 	shutdown(): void {
-		outputFn(line("info", paint(c.yellow, "Shutting down — cancelling orders...")));
+		outputFn(
+			line("info", paint(c.yellow, "Shutting down — cancelling orders...")),
+		);
 	},
 };
