@@ -1,0 +1,42 @@
+{
+  "name": "01-mm-pro",
+  "version": "1.0.0",
+  "description": "Production-grade market maker for 01 Exchange — risk-managed with inventory skew, dynamic spread, funding bias, drawdown kill switch, and a backtest harness.",
+  "type": "module",
+  "main": "dist/cli/bot.js",
+  "scripts": {
+    "build": "tsc",
+    "bot": "node --import tsx --import ./src/polyfills.ts src/cli/bot.ts",
+    "monitor": "node --import tsx --import ./src/polyfills.ts src/cli/monitor.ts",
+    "backtest": "node --import tsx src/cli/backtest.ts",
+    "logdemo": "node --import tsx src/cli/logdemo.ts",
+    "typecheck": "tsc --noEmit",
+    "check": "biome check src",
+    "format": "biome format --write src",
+    "lint": "biome lint src"
+  },
+  "author": "dimasdew",
+  "license": "MIT",
+  "dependencies": {
+    "@n1xyz/nord-ts": "^0.3.5",
+    "@solana/web3.js": "^1.98.0",
+    "blessed": "^0.1.81",
+    "bs58": "^6.0.0",
+    "decimal.js": "^10.4.3",
+    "dotenv": "^16.4.7",
+    "lodash-es": "^4.17.23",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.3.13",
+    "@types/blessed": "^0.1.27",
+    "@types/lodash-es": "^4.17.12",
+    "@types/node": "^22.10.0",
+    "@types/ws": "^8.5.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  }
+}

@@ -1,0 +1,28 @@
+# 24/7 deploy for 01-mm-pro.
+#   docker compose up -d --build      # start in background, auto-build
+#   docker compose logs -f            # tail logs
+#   docker compose down               # stop (graceful: cancels resting orders)
+#
+# restart: unless-stopped => bot auto-restarts on crash / VPS reboot,
+# but stays down if YOU stopped it deliberately. This is the real 24/7 — NOT cron.
+
+services:
+  01-mm:
+    build: .
+    container_name: 01-mm-pro
+    restart: unless-stopped
+    env_file:
+      - .env
+    # Resource caps so a runaway can't eat the whole VPS.
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+    # Surface logs without unbounded disk growth.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    # Graceful shutdown window so SIGTERM can cancel orders before kill.
+    stop_grace_period: 15s

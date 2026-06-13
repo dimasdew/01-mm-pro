@@ -1,0 +1,29 @@
+# Dependencies & build output
+node_modules/
+dist/
+
+# Secrets - NEVER include in image
+.env
+.env.*
+!.env.example
+
+# Git
+.git/
+.gitignore
+
+# IDE
+.vscode/
+.idea/
+
+# Docs & assets (not needed in image)
+docs/
+*.md
+LICENSE
+
+# Logs
+*.log
+logs/
+
+# OS
+.DS_Store
+Thumbs.db
