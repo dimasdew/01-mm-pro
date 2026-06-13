@@ -142,10 +142,29 @@ Default lain udah sane, biarin aja sampe lo paham. Detail tiap knob ada di `.env
 
 ## 7. Jalankan LIVE (taruh order beneran)
 
+Tinggal `npm run bot` — bakal muncul **wizard** yang nanya 3 hal:
+
+```
+Mau berapa pair?            -> jumlah, mis. 2
+Pair apa aja?               -> BTC ETH  (BTC-PERP / ethusdt juga kebaca)
+Margin per entry berapa $?  -> $ sebelum leverage, mis. 5
+```
+
+Abis itu recap + konfirmasi `y/n`. Leverage GAK ditanya — 01.xyz cross-margin,
+leverage = rata kanan (max per market = `1/imf`). Bot cuma ngitung
+`notional = margin / imf` per coin otomatis.
+
 ```bash
-npm run bot                 # default BTC,ETH,SOL bareng (1 proses)
-npm run bot -- BTC ETH SOL  # pilih sendiri
-npm run bot -- BTC          # 1 market aja
+npm run bot                 # wizard interaktif (default kalau di terminal)
+```
+
+Mau skip wizard (buat Docker / scripted)? Kasih symbol langsung atau set
+`NON_INTERACTIVE=1`, margin diambil dari `MARGIN_PER_ENTRY_USD` di `.env`:
+
+```bash
+npm run bot -- BTC ETH SOL     # pilih sendiri, no wizard
+npm run bot -- BTC             # 1 market, no wizard
+NON_INTERACTIVE=1 npm run bot  # baca SYMBOLS env / default, no wizard
 ```
 
 - Multi-symbol jalan bareng dalam **1 proses**, share 1 wallet session.

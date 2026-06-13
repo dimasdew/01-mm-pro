@@ -53,8 +53,13 @@ function bool(name: string, fallback: boolean): boolean {
 
 // Sane, fee-aware defaults. 01.xyz maker fee ~0, taker fee applies on close-mode
 // crosses — takeProfitBps default keeps closes profitable after costs.
-export function loadConfig(symbol: string): MarketMakerConfig {
-	return {
+// `overrides` lets the interactive wizard inject runtime values (e.g. margin per
+// entry chosen at startup) without mutating process.env.
+export function loadConfig(
+	symbol: string,
+	overrides: Partial<MarketMakerConfig> = {},
+): MarketMakerConfig {
+	const base: MarketMakerConfig = {
 		symbol,
 
 		// Core
@@ -90,6 +95,7 @@ export function loadConfig(symbol: string): MarketMakerConfig {
 		fundingPollMs: num("FUNDING_POLL_MS", 60_000),
 		fundingSkewBps: num("FUNDING_SKEW_BPS", 4),
 	};
+	return { ...base, ...overrides, symbol };
 }
 
 // Back-compat export (symbol injected by caller)

@@ -18,6 +18,9 @@ import { MarketMaker } from "./index.js";
 export interface MultiMarketMakerOptions {
 	readonly symbols: string[];
 	readonly privateKey: string;
+	// Optional runtime override for margin committed per entry (USD). When set,
+	// it overrides MARGIN_PER_ENTRY_USD from env for every market in this run.
+	readonly marginPerEntryUsd?: number;
 }
 
 export class MultiMarketMaker {
@@ -45,8 +48,12 @@ export class MultiMarketMaker {
 		this.registerShutdownHandlers();
 
 		// Build one MarketMaker per symbol, all sharing the same client.
+		const overrides =
+			this.opts.marginPerEntryUsd !== undefined
+				? { marginPerEntryUsd: this.opts.marginPerEntryUsd }
+				: {};
 		for (const symbol of this.opts.symbols) {
-			const cfg: MarketMakerConfig = loadConfig(symbol);
+			const cfg: MarketMakerConfig = loadConfig(symbol, overrides);
 			const mm = new MarketMaker(cfg, this.opts.privateKey, this.client);
 			this.instances.push({ symbol, mm });
 		}

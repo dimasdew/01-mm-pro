@@ -13,6 +13,10 @@ services:
     restart: unless-stopped
     env_file:
       - .env
+    # Force non-interactive: no TTY in a container, so the startup wizard is
+    # skipped and the bot reads SYMBOLS / MARGIN_PER_ENTRY_USD from .env.
+    environment:
+      NON_INTERACTIVE: "1"
     # Resource caps so a runaway can't eat the whole VPS.
     deploy:
       resources:

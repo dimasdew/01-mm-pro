@@ -50,15 +50,29 @@ Outputs fills, realized PnL, max drawdown, and whether the risk halt engaged. Tu
 
 ## Run live
 
-Multi-symbol by default — runs **BTC, ETH, SOL** in a single process sharing one
-wallet session (01.xyz cross-margin account):
+Run `npm run bot` in a terminal and an **interactive setup wizard** asks you:
+
+1. how many pairs to market-make
+2. which pairs (defaults offered, `BTC-PERP` / `ethusdt` style accepted)
+3. margin per entry in USD (before leverage)
 
 ```bash
-npm run bot                 # SYMBOLS env, or default BTC ETH SOL
-npm run bot -- BTC ETH SOL  # explicit list
-npm run bot -- BTC          # single market
-SYMBOLS=BTC,ETH npm run bot # via env
+npm run bot                 # interactive wizard (TTY)
 ```
+
+Leverage is never asked: 01.xyz is cross-margin and leverage is fixed per market
+(max = `1/imf`, "rata kanan"). The bot only sizes orders as `notional = margin / imf`.
+
+**Skip the wizard** (Docker/CI/scripted) — pass symbols or set `NON_INTERACTIVE=1`,
+and margin comes from `MARGIN_PER_ENTRY_USD` in `.env`:
+
+```bash
+npm run bot -- BTC ETH SOL        # explicit list, no wizard
+npm run bot -- BTC                # single market, no wizard
+NON_INTERACTIVE=1 npm run bot     # SYMBOLS env / default, no wizard
+SYMBOLS=BTC,ETH NON_INTERACTIVE=1 npm run bot
+```
+
 
 **Sizing:** each entry commits `MARGIN_PER_ENTRY_USD` (default **$2**) of margin.
 The order notional is auto-derived per market from its initial-margin fraction
