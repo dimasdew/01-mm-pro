@@ -11,15 +11,15 @@ A risk-managed market maker built for real capital — proper risk layer, smarte
 | Area | Baseline MM | 01-mm-pro |
 |---|---|---|
 | **Drawdown protection** | none | Kill switch: halt + cancel all orders when session PnL ≤ `-MAX_DRAWDOWN_USD` |
-| **Auto-flatten on halt** | none | On halt, closes the residual position with a reduce-only IOC (taker) — no manual close needed |
+| **Auto-flatten on halt** | none | On a **latched** halt (drawdown / manual), closes the residual position with a reduce-only IOC (taker) — no manual close needed. Transient halts pause instead (see below) |
 | **Inventory cap** | soft close-mode only | Hard `MAX_INVENTORY_USD` — blocks the side that grows the position past the cap |
 | **Inventory skew** | none (just disables one side) | Shifts fair price against inventory so the bot actively mean-reverts its position |
 | **Spread** | fixed 8 bps | Dynamic: widens with realized volatility (`VOL_SPREAD_MULT`, capped at `MAX_SPREAD_BPS`) |
 | **Take-profit** | 0.1 bps (often < fees) | 3 bps default — actually covers costs |
 | **Funding** | ignored | Polls Binance funding, biases quotes to avoid paying funding (`FUNDING_AWARE`) |
 | **Anti-trend guard** | none | Detects signed directional drift; widens then **pauses** the against-trend side so it stops feeding a falling knife / selling into a rocket (`ANTI_TREND_GUARD`) |
-| **Stale feeds** | 60 s reconnect only | Quoting halts if any feed is older than `STALE_FEED_MS` (default 5 s) |
-| **Error handling** | logs & retries | Halts after `MAX_CONSECUTIVE_ERRORS` to avoid blind hammering |
+| **Stale feeds** | 60 s reconnect only | Pauses quoting if any feed is older than `STALE_FEED_MS` (default 5 s), then **auto-resumes** once feeds are fresh again — no manual restart |
+| **Error handling** | logs & retries | Benign exchange rejects (post-only would-cross, cancel-of-gone, min-size) are treated as **transient** and ignored. Real failures halt after `MAX_CONSECUTIVE_ERRORS` and **auto-recover** on the next clean cycle |
 | **Defaults** | `orderSize=3000`, `closeThreshold=10` (1 fill → instant close mode) | Sane, fully `.env`-driven |
 | **Backtesting** | none | `npm run backtest` — multi-day Binance 1m klines (paginated, 7–30+ d) + trend-stress metrics |
 | **Node version** | requires Node ≥ 25 | Runs on Node ≥ 22 via a small hex polyfill |
@@ -31,7 +31,7 @@ A risk-managed market maker built for real capital — proper risk layer, smarte
 3. Quotes bid = `fair − halfSpread`, ask = `fair + halfSpread`, where `halfSpread` grows with volatility.
 4. **Anti-trend guard**: measures signed directional drift (least-squares slope over `VOL_WINDOW_SEC`). Above `TREND_DRIFT_THRESHOLD_BPS` it widens the against-trend side; above `TREND_PAUSE_DRIFT_BPS` it stops quoting that side entirely — so the bot never keeps buying a falling knife or selling into a rocket. Chop (high vol, no net drift) is ignored, so it doesn't kill normal market making.
 5. As inventory builds, skew leans the bot toward reducing; past `CLOSE_THRESHOLD_USD` it goes close-only; at `MAX_INVENTORY_USD` it hard-blocks the growing side.
-6. The **RiskManager** tracks realized PnL, feed staleness, and errors — and halts + flattens when any limit is breached.
+6. The **RiskManager** tracks realized PnL, feed staleness, and errors. **Latched** halts (drawdown, manual) cancel orders **and flatten** the position, then stay down until restart. **Transient** halts (stale feed, error burst) just pause quoting and **auto-recover** once the cause clears — no position dump, no manual restart.
 
 ## Setup
 
