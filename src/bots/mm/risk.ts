@@ -80,6 +80,31 @@ export class RiskManager {
 		}
 	}
 
+	// Drawdown check on TOTAL PnL (realized + unrealized) using exchange-truth
+	// numbers when available. The fill-only check above is blind to floating
+	// loss on an open position — a bag bleeding -$200 unrealized never trips it
+	// because nothing is realized yet. This is the real kill switch: it must be
+	// fed every cycle with the venue's own uPnL (price + funding) so the trigger
+	// matches the margin the exchange actually sees.
+	//
+	// realizedOverride: when provided (exchange-truth), use it instead of the
+	// locally reconstructed realizedPnl, which can drift from funding/fees/
+	// missed fills. Pass null to keep the local realized estimate.
+	checkTotalDrawdown(
+		unrealizedPnl: number,
+		realizedOverride: number | null = null,
+	): void {
+		if (this.halted) return;
+		const realized = realizedOverride ?? this.realizedPnl;
+		const total = realized + unrealizedPnl;
+		if (total <= -this.config.maxDrawdownUsd) {
+			log.error(
+				`🛑 DRAWDOWN (total) — realized=$${realized.toFixed(2)} + unrealized=$${unrealizedPnl.toFixed(2)} = $${total.toFixed(2)} <= -$${this.config.maxDrawdownUsd}`,
+			);
+			this.trip("drawdown");
+		}
+	}
+
 	// Returns true if placing `addUsd` of inventory on `side` is allowed.
 	// addUsd is positive notional being added; we project new |inventory|.
 	canIncreaseInventory(

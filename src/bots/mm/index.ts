@@ -470,6 +470,24 @@ export class MarketMaker {
 			// Stale-feed circuit breaker (auto-recovers when feeds are fresh).
 			this.risk.checkFeeds(this.feedAges());
 
+			// Real drawdown kill switch on TOTAL PnL (realized + unrealized),
+			// driven by exchange-truth numbers. The fill-only realized check is
+			// blind to floating loss on an open position; this catches a bag
+			// bleeding unrealized before it blows past maxDrawdown. Uses the
+			// venue's own price+funding uPnL when a sync has landed.
+			const exSnap = this.positionTracker.getExchangeSnapshot();
+			if (exSnap) {
+				const exUnrealized = exSnap.sizePricePnl + exSnap.fundingPnl;
+				this.risk.checkTotalDrawdown(exUnrealized, null);
+			} else {
+				// Pre-first-sync: fall back to local mark-based uPnL estimate.
+				const mark =
+					this.orderbookStream?.getMidPrice()?.mid ??
+					this.binanceFeed?.getMidPrice()?.mid ??
+					fairPrice;
+				this.risk.checkTotalDrawdown(this.risk.unrealizedPnl(mark), null);
+			}
+
 			// If halted, decide between flatten and pause:
 			//   - Latched halts (drawdown / manual) = real risk event => flatten
 			//     the position and stop until a manual restart.
