@@ -57,6 +57,49 @@ function bool(name: string, fallback: boolean): boolean {
 	return v === "1" || v.toLowerCase() === "true";
 }
 
+// Per-symbol numeric override. Looks up `<NAME>_<SYMBOL>` first (e.g.
+// MAX_INVENTORY_USD_SOL), falling back to the global `<NAME>`, then `fallback`.
+// Symbol is upper-cased and stripped to [A-Z0-9] so "btc-perp" -> "BTC".
+function numForSymbol(name: string, symbol: string, fallback: number): number {
+	const sym = symbol.toUpperCase().replace(/[^A-Z0-9]/g, "");
+	const perSym = process.env[`${name}_${sym}`];
+	if (perSym !== undefined && perSym !== "") {
+		const n = Number(perSym);
+		if (Number.isFinite(n)) return n;
+	}
+	return num(name, fallback);
+}
+
+// Resolve the close-bias trigger for a symbol. Priority:
+//   1) explicit per-symbol  CLOSE_THRESHOLD_USD_<SYM>
+//   2) explicit global      CLOSE_THRESHOLD_USD  (only if no per-symbol max set)
+//   3) auto-scaled: per-symbol max * (globalClose / globalMax) ratio
+// (3) means raising MAX_INVENTORY_USD_SOL alone keeps the close trigger at the
+// same proportion of the cap as the global pair, so one knob per coin is enough.
+function closeThresholdForSymbol(symbol: string): number {
+	const sym = symbol.toUpperCase().replace(/[^A-Z0-9]/g, "");
+	// 1) explicit per-symbol override wins outright.
+	const perSym = process.env[`CLOSE_THRESHOLD_USD_${sym}`];
+	if (perSym !== undefined && perSym !== "") {
+		const n = Number(perSym);
+		if (Number.isFinite(n)) return n;
+	}
+
+	const globalMax = num("MAX_INVENTORY_USD", 1000);
+	const globalClose = num("CLOSE_THRESHOLD_USD", 600);
+	const ratio = globalMax > 0 ? globalClose / globalMax : 0.6;
+
+	const perSymMax = process.env[`MAX_INVENTORY_USD_${sym}`];
+	const hasPerSymMax = perSymMax !== undefined && perSymMax !== "";
+
+	// 2) no per-symbol cap => fall back to the global close threshold as-is.
+	if (!hasPerSymMax) return globalClose;
+
+	// 3) per-symbol cap set but no per-symbol close => scale by the global ratio.
+	const symMax = numForSymbol("MAX_INVENTORY_USD", symbol, globalMax);
+	return Math.round(symMax * ratio);
+}
+
 // Sane, fee-aware defaults. 01.xyz maker fee ~0, taker fee applies on close-mode
 // crosses — takeProfitBps default keeps closes profitable after costs.
 // `overrides` lets the interactive wizard inject runtime values (e.g. margin per
@@ -80,9 +123,13 @@ export function loadConfig(
 		fairPriceWindowMs: num("FAIR_PRICE_WINDOW_MS", 5 * 60 * 1000),
 		positionSyncIntervalMs: num("POSITION_SYNC_INTERVAL_MS", 5000),
 
-		// Inventory — closeThreshold now > orderSize so it actually engages gradually
-		maxInventoryUsd: num("MAX_INVENTORY_USD", 1000),
-		closeThresholdUsd: num("CLOSE_THRESHOLD_USD", 600),
+		// Inventory — per-symbol caps. MAX_INVENTORY_USD_<SYM> overrides the global
+		// MAX_INVENTORY_USD per coin (e.g. BTC=1500, SOL=500). closeThreshold scales
+		// with the same ratio as the global pair so you only set ONE number per coin:
+		// if you raise MAX_INVENTORY_USD_SOL but leave CLOSE_THRESHOLD_USD_SOL unset,
+		// the close-bias trigger auto-tracks at the global close/max ratio (0.6).
+		maxInventoryUsd: numForSymbol("MAX_INVENTORY_USD", symbol, 1000),
+		closeThresholdUsd: closeThresholdForSymbol(symbol),
 		inventorySkewBps: num("INVENTORY_SKEW_BPS", 6),
 
 		// Dynamic spread
