@@ -206,6 +206,10 @@ export class MarketMaker {
 			volSpreadMult: this.config.volSpreadMult,
 			maxSpreadBps: this.config.maxSpreadBps,
 			fundingSkewBps: this.config.fundingSkewBps,
+			antiTrendGuard: this.config.antiTrendGuard,
+			trendDriftThresholdBps: this.config.trendDriftThresholdBps,
+			trendPauseDriftBps: this.config.trendPauseDriftBps,
+			trendSpreadMult: this.config.trendSpreadMult,
 		});
 
 		this.accountStream = new AccountStream(nord, this.client.accountId);
@@ -479,11 +483,29 @@ export class MarketMaker {
 			}
 
 			const bbo = this.orderbookStream?.getBBO() ?? null;
+			const driftBps = this.vol?.getDriftBps() ?? 0;
 			const signals = {
 				volBps: this.vol?.getVolBps() ?? 0,
 				fundingRate: this.funding?.getRate() ?? 0,
+				driftBps,
 			};
 			const quotes = this.quoter.getQuotes(quotingCtx, bbo, signals);
+
+			// Surface anti-trend guard activity so it's visible in logs.
+			if (
+				this.config.antiTrendGuard &&
+				!positionState.isCloseMode &&
+				Math.abs(driftBps) >= this.config.trendDriftThresholdBps
+			) {
+				const dir = driftBps > 0 ? "UP" : "DOWN";
+				const paused = Math.abs(driftBps) >= this.config.trendPauseDriftBps;
+				const guarded = driftBps > 0 ? "ask" : "bid";
+				log.warn(
+					`Trend guard: drift ${driftBps.toFixed(1)}bps ${dir} — ${
+						paused ? `PAUSED ${guarded} side` : `widening ${guarded} side`
+					}`,
+				);
+			}
 
 			if (quotes.length === 0) {
 				log.warn("No quotes generated (size too small or fully capped)");
@@ -535,6 +557,9 @@ export class MarketMaker {
 			"Max Inventory": `$${this.config.maxInventoryUsd}`,
 			"Max Drawdown": `$${this.config.maxDrawdownUsd}`,
 			"Funding Aware": `${this.config.fundingAware}`,
+			"Trend Guard": this.config.antiTrendGuard
+				? `on (widen >=${this.config.trendDriftThresholdBps}bps, pause >=${this.config.trendPauseDriftBps}bps)`
+				: "off",
 		});
 	}
 

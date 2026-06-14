@@ -17,6 +17,7 @@ A risk-managed market maker built for real capital — proper risk layer, smarte
 | **Spread** | fixed 8 bps | Dynamic: widens with realized volatility (`VOL_SPREAD_MULT`, capped at `MAX_SPREAD_BPS`) |
 | **Take-profit** | 0.1 bps (often < fees) | 3 bps default — actually covers costs |
 | **Funding** | ignored | Polls Binance funding, biases quotes to avoid paying funding (`FUNDING_AWARE`) |
+| **Anti-trend guard** | none | Detects signed directional drift; widens then **pauses** the against-trend side so it stops feeding a falling knife / selling into a rocket (`ANTI_TREND_GUARD`) |
 | **Stale feeds** | 60 s reconnect only | Quoting halts if any feed is older than `STALE_FEED_MS` (default 5 s) |
 | **Error handling** | logs & retries | Halts after `MAX_CONSECUTIVE_ERRORS` to avoid blind hammering |
 | **Defaults** | `orderSize=3000`, `closeThreshold=10` (1 fill → instant close mode) | Sane, fully `.env`-driven |
@@ -28,8 +29,9 @@ A risk-managed market maker built for real capital — proper risk layer, smarte
 1. Builds a **fair price** = `binance_mid + median(01_mid − binance_mid)` over a rolling window.
 2. Applies **inventory skew** and **funding skew** to that fair price.
 3. Quotes bid = `fair − halfSpread`, ask = `fair + halfSpread`, where `halfSpread` grows with volatility.
-4. As inventory builds, skew leans the bot toward reducing; past `CLOSE_THRESHOLD_USD` it goes close-only; at `MAX_INVENTORY_USD` it hard-blocks the growing side.
-5. The **RiskManager** tracks realized PnL, feed staleness, and errors — and halts + flattens when any limit is breached.
+4. **Anti-trend guard**: measures signed directional drift (least-squares slope over `VOL_WINDOW_SEC`). Above `TREND_DRIFT_THRESHOLD_BPS` it widens the against-trend side; above `TREND_PAUSE_DRIFT_BPS` it stops quoting that side entirely — so the bot never keeps buying a falling knife or selling into a rocket. Chop (high vol, no net drift) is ignored, so it doesn't kill normal market making.
+5. As inventory builds, skew leans the bot toward reducing; past `CLOSE_THRESHOLD_USD` it goes close-only; at `MAX_INVENTORY_USD` it hard-blocks the growing side.
+6. The **RiskManager** tracks realized PnL, feed staleness, and errors — and halts + flattens when any limit is breached.
 
 ## Setup
 

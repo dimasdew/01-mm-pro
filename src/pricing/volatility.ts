@@ -47,6 +47,40 @@ export class VolatilityEstimator {
 		return std * 10000; // to bps
 	}
 
+	// Directional drift expressed in bps over the window — SIGNED.
+	// Positive => price trending up, negative => trending down.
+	// Method: least-squares slope of price vs time, projected across the full
+	// window span, divided by the mean price. This isolates one-sided momentum
+	// (a trend) from symmetric chop (which getVolBps already captures).
+	// Returns 0 until there are enough samples or the window has no time span.
+	getDriftBps(): number {
+		const n = this.samples.length;
+		if (n < 5) return 0;
+
+		// Use relative time (seconds) to keep the slope numerically stable.
+		const t0 = this.samples[0].ts;
+		const xs = this.samples.map((s) => (s.ts - t0) / 1000);
+		const ys = this.samples.map((s) => s.price);
+
+		const meanX = xs.reduce((a, b) => a + b, 0) / n;
+		const meanY = ys.reduce((a, b) => a + b, 0) / n;
+		if (meanY <= 0) return 0;
+
+		let num = 0;
+		let den = 0;
+		for (let i = 0; i < n; i++) {
+			const dx = xs[i] - meanX;
+			num += dx * (ys[i] - meanY);
+			den += dx * dx;
+		}
+		if (den === 0) return 0; // no time span
+
+		const slopePerSec = num / den; // price units per second
+		const spanSec = xs[n - 1] - xs[0]; // total observed window span
+		const projectedMove = slopePerSec * spanSec; // price drift across window
+		return (projectedMove / meanY) * 10000; // to bps, signed
+	}
+
 	getSampleCount(): number {
 		return this.samples.length;
 	}

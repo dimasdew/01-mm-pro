@@ -25,12 +25,18 @@ export interface QuoterParams {
 	volSpreadMult: number;
 	maxSpreadBps: number;
 	fundingSkewBps: number;
+	// anti-trend guard
+	antiTrendGuard: boolean;
+	trendDriftThresholdBps: number;
+	trendPauseDriftBps: number;
+	trendSpreadMult: number;
 }
 
 // Extra live signals passed per update.
 export interface QuoteSignals {
 	volBps: number; // realized volatility in bps
 	fundingRate: number; // funding fraction (e.g. 0.0001)
+	driftBps: number; // SIGNED directional drift in bps (+ up, - down)
 }
 
 export class Quoter {
@@ -47,6 +53,54 @@ export class Quoter {
 		if (!this.p.dynamicSpread) return this.p.baseSpreadBps;
 		const widened = this.p.baseSpreadBps + volBps * this.p.volSpreadMult;
 		return Math.min(widened, this.p.maxSpreadBps);
+	}
+
+	// Anti-trend guard. Given signed drift, decide per-side action:
+	//   - extraBidBps / extraAskBps: extra half-spread added to the side that
+	//     stands AGAINST the trend (it's the side most likely to be picked off).
+	//   - pauseBid / pauseAsk: drop that side entirely (drift too strong).
+	// Up-trend (drift > 0): the ASK gets adversely selected (we sell low into a
+	// rising market) => widen/pause the ASK. Down-trend: widen/pause the BID.
+	private trendGuard(driftBps: number): {
+		extraBidBps: number;
+		extraAskBps: number;
+		pauseBid: boolean;
+		pauseAsk: boolean;
+	} {
+		const none = {
+			extraBidBps: 0,
+			extraAskBps: 0,
+			pauseBid: false,
+			pauseAsk: false,
+		};
+		if (!this.p.antiTrendGuard) return none;
+
+		const mag = Math.abs(driftBps);
+		if (mag < this.p.trendDriftThresholdBps) return none;
+
+		const pause = mag >= this.p.trendPauseDriftBps;
+		// proportional widening above the threshold, capped by maxSpreadBps headroom
+		const extra = Math.min(
+			(mag - this.p.trendDriftThresholdBps) * this.p.trendSpreadMult,
+			this.p.maxSpreadBps,
+		);
+
+		if (driftBps > 0) {
+			// up-trend => protect ASK (against-trend side)
+			return {
+				extraBidBps: 0,
+				extraAskBps: extra,
+				pauseBid: false,
+				pauseAsk: pause,
+			};
+		}
+		// down-trend => protect BID (against-trend side)
+		return {
+			extraBidBps: extra,
+			extraAskBps: 0,
+			pauseBid: pause,
+			pauseAsk: false,
+		};
 	}
 
 	// Skew (in bps) applied to fair price. Negative skew lowers fair => makes the
@@ -87,7 +141,23 @@ export class Quoter {
 		const fair = new Decimal(fairPrice).mul(
 			new Decimal(1).add(new Decimal(skewBps).div(10000)),
 		);
-		const spreadAmount = fair.mul(halfSpreadBps).div(10000);
+
+		// Anti-trend guard: per-side extra half-spread + side pause. Disabled in
+		// close mode (we just want out, symmetric take-profit).
+		const guard = positionState.isCloseMode
+			? { extraBidBps: 0, extraAskBps: 0, pauseBid: false, pauseAsk: false }
+			: this.trendGuard(signals.driftBps);
+
+		const bidHalfBps = Math.min(
+			halfSpreadBps + guard.extraBidBps,
+			this.p.maxSpreadBps,
+		);
+		const askHalfBps = Math.min(
+			halfSpreadBps + guard.extraAskBps,
+			this.p.maxSpreadBps,
+		);
+		const bidSpreadAmount = fair.mul(bidHalfBps).div(10000);
+		const askSpreadAmount = fair.mul(askHalfBps).div(10000);
 
 		// Size: in close mode, only quote the position size; else fixed USD.
 		let size: Decimal;
@@ -100,8 +170,8 @@ export class Quoter {
 
 		const quotes: Quote[] = [];
 
-		if (allowedSides.includes("bid")) {
-			let bidPrice = this.alignPrice(fair.sub(spreadAmount), "floor");
+		if (allowedSides.includes("bid") && !guard.pauseBid) {
+			let bidPrice = this.alignPrice(fair.sub(bidSpreadAmount), "floor");
 			if (bbo && bidPrice.gte(bbo.bestAsk)) {
 				bidPrice = this.alignPrice(
 					new Decimal(bbo.bestAsk).sub(this.tickSize),
@@ -111,8 +181,8 @@ export class Quoter {
 			if (bidPrice.gt(0)) quotes.push({ side: "bid", price: bidPrice, size });
 		}
 
-		if (allowedSides.includes("ask")) {
-			let askPrice = this.alignPrice(fair.add(spreadAmount), "ceil");
+		if (allowedSides.includes("ask") && !guard.pauseAsk) {
+			let askPrice = this.alignPrice(fair.add(askSpreadAmount), "ceil");
 			if (bbo && askPrice.lte(bbo.bestBid)) {
 				askPrice = this.alignPrice(
 					new Decimal(bbo.bestBid).add(this.tickSize),

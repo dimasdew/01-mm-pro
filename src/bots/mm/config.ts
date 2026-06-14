@@ -36,6 +36,12 @@ export interface MarketMakerConfig {
 	readonly fundingAware: boolean; // Bias quotes against unfavorable funding
 	readonly fundingPollMs: number; // Poll Binance funding rate interval
 	readonly fundingSkewBps: number; // Max extra skew from funding (bps)
+
+	// --- Anti-trend guard (NEW) ---
+	readonly antiTrendGuard: boolean; // Defend against trending markets (adverse selection)
+	readonly trendDriftThresholdBps: number; // |drift| above this => widen the against-trend side
+	readonly trendPauseDriftBps: number; // |drift| above this => stop quoting the against-trend side entirely
+	readonly trendSpreadMult: number; // extra against-trend half-spread = (|drift|-thresh) * this
 }
 
 function num(name: string, fallback: number): number {
@@ -94,6 +100,15 @@ export function loadConfig(
 		fundingAware: bool("FUNDING_AWARE", true),
 		fundingPollMs: num("FUNDING_POLL_MS", 60_000),
 		fundingSkewBps: num("FUNDING_SKEW_BPS", 4),
+
+		// Anti-trend guard — protect against one-sided momentum (adverse selection).
+		// drift below threshold => no effect. Between threshold and pause => widen
+		// the against-trend side proportionally. Above pause => stop quoting that
+		// side (don't feed liquidity to a falling/rising knife).
+		antiTrendGuard: bool("ANTI_TREND_GUARD", true),
+		trendDriftThresholdBps: num("TREND_DRIFT_THRESHOLD_BPS", 8),
+		trendPauseDriftBps: num("TREND_PAUSE_DRIFT_BPS", 20),
+		trendSpreadMult: num("TREND_SPREAD_MULT", 1.5),
 	};
 	return { ...base, ...overrides, symbol };
 }
