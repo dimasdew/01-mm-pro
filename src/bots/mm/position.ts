@@ -25,6 +25,18 @@ export interface PositionConfig {
 export class PositionTracker {
 	private baseSize = 0;
 	private isRunning = false;
+	// Exchange-truth snapshot from the last successful sync. These drive the
+	// uPnL / avg-entry / margin numbers we display, because the locally
+	// reconstructed RiskManager state can drift from the actual account
+	// (missed/duplicate fills, a position that pre-dates the bot, funding,
+	// taker fees). null until the first sync lands.
+	private exchange: {
+		baseSize: number; // signed: + long, - short
+		avgEntry: number; // exchange VWAP entry (perp.price)
+		sizePricePnl: number; // exchange-computed price uPnL (USDC)
+		fundingPnl: number; // accrued funding (USDC)
+		syncedAt: number;
+	} | null = null;
 
 	constructor(private readonly config: PositionConfig) {}
 
@@ -71,6 +83,28 @@ export class PositionTracker {
 					? pos.perp.baseSize
 					: -pos.perp.baseSize
 				: 0;
+
+			// Capture exchange-truth PnL/entry so the status line shows the same
+			// numbers the venue uses for margin — not our reconstructed guess.
+			if (pos?.perp) {
+				this.exchange = {
+					baseSize: serverSize,
+					avgEntry: pos.perp.price,
+					sizePricePnl: pos.perp.sizePricePnl,
+					fundingPnl: pos.perp.fundingPaymentPnl,
+					syncedAt: Date.now(),
+				};
+			} else {
+				// Flat on the exchange: zero everything so a stale snapshot can't
+				// keep reporting a position that's already closed.
+				this.exchange = {
+					baseSize: 0,
+					avgEntry: 0,
+					sizePricePnl: 0,
+					fundingPnl: 0,
+					syncedAt: Date.now(),
+				};
+			}
 
 			if (Math.abs(this.baseSize - serverSize) > 0.0001) {
 				log.warn(
@@ -136,6 +170,19 @@ export class PositionTracker {
 
 	getBaseSize(): number {
 		return this.baseSize;
+	}
+
+	// Exchange-truth snapshot (avg entry, price uPnL, funding uPnL) from the
+	// last sync. null until the first sync lands. Use this for displayed
+	// PnL/margin numbers; the locally reconstructed RiskManager state can drift.
+	getExchangeSnapshot(): {
+		baseSize: number;
+		avgEntry: number;
+		sizePricePnl: number;
+		fundingPnl: number;
+		syncedAt: number;
+	} | null {
+		return this.exchange;
 	}
 
 	isCloseMode(fairPrice: number): boolean {

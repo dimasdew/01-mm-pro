@@ -627,15 +627,30 @@ export class MarketMaker {
 		const bestAsk =
 			asks.length > 0 ? Math.min(...asks.map((o) => o.price.toNumber())) : null;
 
+		// Prefer EXCHANGE-TRUTH numbers for the open position. The RiskManager
+		// reconstructs position/uPnL from the fills it observed, which can drift
+		// from the actual account (missed/duplicate fills, a position that
+		// pre-dates the bot, funding, taker fees) — that drift is exactly why
+		// the displayed uPnL didn't match real margin. The PositionTracker syncs
+		// avg-entry and uPnL straight from the venue, so use those when fresh and
+		// only fall back to the local estimate before the first sync lands.
+		const ex = this.positionTracker?.getExchangeSnapshot() ?? null;
+		const hasExchange = ex !== null;
+		const posBase = hasExchange ? ex.baseSize : stats.invBase;
+		const avgEntry = hasExchange ? ex.avgEntry : stats.avgEntry;
+		const unrealizedPnl = hasExchange
+			? ex.sizePricePnl + ex.fundingPnl
+			: stats.unrealizedPnl;
+
 		log.status({
 			symbol: this.marketSymbol,
 			mark,
-			posBase: stats.invBase,
-			posUsd: stats.invBase * mark,
-			avgEntry: stats.avgEntry,
+			posBase,
+			posUsd: posBase * mark,
+			avgEntry,
 			realizedPnl: stats.realizedPnl,
-			unrealizedPnl: stats.unrealizedPnl,
-			totalPnl: stats.totalPnl,
+			unrealizedPnl,
+			totalPnl: stats.realizedPnl + unrealizedPnl,
 			fillCount: stats.fillCount,
 			volumeUsd: stats.volumeUsd,
 			volBps: this.vol?.getVolBps() ?? 0,
