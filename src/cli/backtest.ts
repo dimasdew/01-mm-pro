@@ -6,8 +6,11 @@
 // Purpose: sanity-check that risk guards engage and that the strategy isn't
 // obviously bleeding before risking real funds. Treat results as directional only.
 //
-// Usage: npm run backtest -- BTC 1000 200
-//   args: <symbol> <days*1440 bars max via limit> <orderSizeUsd>
+// Usage: npm run backtest -- BTC 30 200
+//   args: <symbol> <days> <orderSizeUsd>
+//   <days> = how many days of 1m history to fetch (paginated, ~1440 bars/day).
+//   Use a long window (7-30d) to stress-test trend/inventory risk — a single
+//   day is usually chop and hides how the bot behaves in a sustained trend.
 
 import { loadConfig } from "../bots/mm/config.js";
 import { RiskManager } from "../bots/mm/risk.js";
@@ -21,18 +24,60 @@ interface Kline {
 	ts: number;
 }
 
-async function fetchKlines(symbol: string, limit: number): Promise<Kline[]> {
-	const url = `https://fapi.binance.com/fapi/v1/klines?symbol=${symbol.toUpperCase()}&interval=1m&limit=${Math.min(limit, 1500)}`;
-	const res = await fetch(url);
-	if (!res.ok) throw new Error(`Binance HTTP ${res.status}`);
-	const raw = (await res.json()) as unknown[][];
-	return raw.map((k) => ({
-		ts: Number(k[0]),
-		open: Number(k[1]),
-		high: Number(k[2]),
-		low: Number(k[3]),
-		close: Number(k[4]),
-	}));
+const BINANCE_MAX_LIMIT = 1500; // per-request hard cap
+const MINUTE_MS = 60_000;
+
+// Fetch up to `totalBars` of 1m klines, paginating backwards via endTime since
+// Binance caps a single response at 1500 candles. Returns chronological order.
+async function fetchKlines(
+	symbol: string,
+	totalBars: number,
+): Promise<Kline[]> {
+	const sym = symbol.toUpperCase();
+	const out: Kline[] = [];
+	let endTime: number | null = null; // ms; null = now
+	let remaining = totalBars;
+
+	while (remaining > 0) {
+		const limit = Math.min(remaining, BINANCE_MAX_LIMIT);
+		let url = `https://fapi.binance.com/fapi/v1/klines?symbol=${sym}&interval=1m&limit=${limit}`;
+		if (endTime !== null) url += `&endTime=${endTime}`;
+
+		const res = await fetch(url);
+		if (!res.ok) throw new Error(`Binance HTTP ${res.status}`);
+		const raw = (await res.json()) as unknown[][];
+		if (raw.length === 0) break; // no more history
+
+		const batch: Kline[] = raw.map((k) => ({
+			ts: Number(k[0]),
+			open: Number(k[1]),
+			high: Number(k[2]),
+			low: Number(k[3]),
+			close: Number(k[4]),
+		}));
+
+		// Prepend older batch ahead of what we already have.
+		out.unshift(...batch);
+		remaining -= batch.length;
+
+		// Next page ends just before this batch's oldest candle.
+		const oldestTs = batch[0].ts;
+		endTime = oldestTs - MINUTE_MS;
+
+		if (batch.length < limit) break; // exchange ran out of history
+		// Gentle pacing to stay well under Binance weight limits.
+		await new Promise((r) => setTimeout(r, 120));
+	}
+
+	// De-dup by timestamp (endTime windows can overlap by one candle) + sort.
+	const seen = new Set<number>();
+	const deduped = out.filter((k) => {
+		if (seen.has(k.ts)) return false;
+		seen.add(k.ts);
+		return true;
+	});
+	deduped.sort((a, b) => a.ts - b.ts);
+	return deduped;
 }
 
 interface SimResult {
@@ -43,6 +88,11 @@ interface SimResult {
 	halted: string | null;
 	finalInvBase: number;
 	feesPaid: number;
+	// trend-stress metrics
+	peakInventoryUsd: number; // largest |inventory| reached (USD) — trend risk proxy
+	worstUnrealizedUsd: number; // most negative mark-to-market on open inventory
+	guardPauseBars: number; // bars where the anti-trend guard paused a side
+	capHitBars: number; // bars where inventory sat at the hard cap
 }
 
 function simulate(
@@ -64,6 +114,10 @@ function simulate(
 	let feesPaid = 0;
 	let peakPnl = 0;
 	let maxDrawdown = 0;
+	let peakInventoryUsd = 0;
+	let worstUnrealizedUsd = 0;
+	let guardPauseBars = 0;
+	let capHitBars = 0;
 
 	// 01.xyz: maker ~0bps. Close-mode exits cross the book (taker IOC) so model a
 	// small taker cost on closing fills to avoid overstating PnL.
@@ -181,6 +235,17 @@ function simulate(
 		const totalPnl = realizedPnl - feesPaid;
 		peakPnl = Math.max(peakPnl, totalPnl);
 		maxDrawdown = Math.max(maxDrawdown, peakPnl - totalPnl);
+
+		// Trend-stress metrics: how big inventory got and how deep the open
+		// position went underwater (mark-to-market vs avg entry).
+		const invUsdNow = invBase * fair;
+		peakInventoryUsd = Math.max(peakInventoryUsd, Math.abs(invUsdNow));
+		if (invBase !== 0 && avgEntry > 0) {
+			const unrealized = (fair - avgEntry) * invBase; // long: + if up
+			worstUnrealizedUsd = Math.min(worstUnrealizedUsd, unrealized);
+		}
+		if (pauseBid || pauseAsk) guardPauseBars++;
+		if (atCap) capHitBars++;
 	}
 
 	return {
@@ -191,37 +256,71 @@ function simulate(
 		halted: risk.getHaltReason(),
 		finalInvBase: invBase,
 		feesPaid,
+		peakInventoryUsd,
+		worstUnrealizedUsd,
+		guardPauseBars,
+		capHitBars,
 	};
 }
 
 async function main(): Promise<void> {
 	const symbol = (process.argv[2] ?? "BTC").toUpperCase();
-	const limit = Number(process.argv[3] ?? 1500);
+	// arg can be days (<=90) or a raw bar count for backwards compat (>90).
+	const arg = Number(process.argv[3] ?? 7);
+	const days = arg <= 90 ? arg : Math.ceil(arg / 1440);
+	const totalBars = arg <= 90 ? Math.round(arg * 1440) : Math.round(arg);
 	const orderSize = process.argv[4];
 	if (orderSize) process.env.ORDER_SIZE_USD = orderSize;
 
 	const binanceSymbol = `${symbol}USDT`;
 	const cfg = loadConfig(symbol);
 
-	console.log(`\n=== Backtest: ${symbol} (${limit} 1m bars) ===`);
 	console.log(
-		`config: spread=${cfg.spreadBps}bps dyn=${cfg.dynamicSpread} tp=${cfg.takeProfitBps}bps size=$${cfg.orderSizeUsd} maxInv=$${cfg.maxInventoryUsd} maxDD=$${cfg.maxDrawdownUsd} skew=${cfg.inventorySkewBps}bps`,
+		`\n=== Backtest: ${symbol} (~${days}d / ${totalBars} 1m bars) ===`,
+	);
+	console.log(
+		`config: spread=${cfg.spreadBps}bps dyn=${cfg.dynamicSpread} tp=${cfg.takeProfitBps}bps size=$${cfg.orderSizeUsd} maxInv=$${cfg.maxInventoryUsd} maxDD=$${cfg.maxDrawdownUsd} skew=${cfg.inventorySkewBps}bps guard=${cfg.antiTrendGuard}`,
 	);
 
-	const klines = await fetchKlines(binanceSymbol, limit);
-	console.log(`fetched ${klines.length} bars\n`);
+	const klines = await fetchKlines(binanceSymbol, totalBars);
+	if (klines.length === 0) {
+		console.error("No klines fetched — check symbol.");
+		process.exit(1);
+	}
+	const spanDays = (
+		(klines[klines.length - 1].ts - klines[0].ts) /
+		86_400_000
+	).toFixed(1);
+	const firstClose = klines[0].close;
+	const lastClose = klines[klines.length - 1].close;
+	const netMovePct = (((lastClose - firstClose) / firstClose) * 100).toFixed(2);
+	console.log(
+		`fetched ${klines.length} bars over ${spanDays}d — price ${firstClose} -> ${lastClose} (${netMovePct}% net move)\n`,
+	);
 
 	const r = simulate(klines, cfg);
+	const guardPausePct = ((r.guardPauseBars / r.bars) * 100).toFixed(1);
+	const capHitPct = ((r.capHitBars / r.bars) * 100).toFixed(1);
 	console.log("--- RESULT ---");
-	console.log(`bars:          ${r.bars}`);
-	console.log(`fills:         ${r.fills}`);
-	console.log(`realized PnL:  $${r.finalPnl.toFixed(2)}`);
-	console.log(`fees paid:     $${r.feesPaid.toFixed(2)}`);
-	console.log(`max drawdown:  $${r.maxDrawdown.toFixed(2)}`);
-	console.log(`final inv:     ${r.finalInvBase.toFixed(6)} ${symbol}`);
-	console.log(`halted:        ${r.halted ?? "no"}`);
+	console.log(`bars:            ${r.bars}`);
+	console.log(`fills:           ${r.fills}`);
+	console.log(`realized PnL:    $${r.finalPnl.toFixed(2)}`);
+	console.log(`fees paid:       $${r.feesPaid.toFixed(2)}`);
+	console.log(`max drawdown:    $${r.maxDrawdown.toFixed(2)}`);
+	console.log(`final inv:       ${r.finalInvBase.toFixed(6)} ${symbol}`);
+	console.log(`halted:          ${r.halted ?? "no"}`);
+	console.log("--- TREND STRESS ---");
 	console.log(
-		`\nNOTE: maker-only fill model, no queue/slippage. Directional sanity check only — NOT a profit guarantee.\n`,
+		`peak inventory:  $${r.peakInventoryUsd.toFixed(2)} (cap $${cfg.maxInventoryUsd})`,
+	);
+	console.log(`worst unrealized: $${r.worstUnrealizedUsd.toFixed(2)}`);
+	console.log(`guard-paused:    ${r.guardPauseBars} bars (${guardPausePct}%)`);
+	console.log(`at inv cap:      ${r.capHitBars} bars (${capHitPct}%)`);
+	console.log(
+		`\nNOTE: maker-only fill model, no queue/slippage. Directional sanity check only — NOT a profit guarantee.`,
+	);
+	console.log(
+		`NOTE: guard-pause % is INFLATED here — backtest feeds 1m closes into a ${cfg.volWindowSec}s vol window (1 sample/min), so the drift slope is far noisier than live per-second ticks. Read peak-inventory / worst-unrealized / halts for trend risk, NOT the pause %.\n`,
 	);
 }
 

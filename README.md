@@ -21,7 +21,7 @@ A risk-managed market maker built for real capital — proper risk layer, smarte
 | **Stale feeds** | 60 s reconnect only | Quoting halts if any feed is older than `STALE_FEED_MS` (default 5 s) |
 | **Error handling** | logs & retries | Halts after `MAX_CONSECUTIVE_ERRORS` to avoid blind hammering |
 | **Defaults** | `orderSize=3000`, `closeThreshold=10` (1 fill → instant close mode) | Sane, fully `.env`-driven |
-| **Backtesting** | none | `npm run backtest` against Binance 1m klines |
+| **Backtesting** | none | `npm run backtest` — multi-day Binance 1m klines (paginated, 7–30+ d) + trend-stress metrics |
 | **Node version** | requires Node ≥ 25 | Runs on Node ≥ 22 via a small hex polyfill |
 
 ## How it works
@@ -44,11 +44,36 @@ cp .env.example .env
 ## Backtest first (always)
 
 ```bash
-npm run backtest -- BTC 1500 200
-#                    ^sym ^bars ^orderSizeUsd
+npm run backtest -- BTC 7 200
+#                    ^sym ^days ^orderSizeUsd
 ```
 
-Outputs fills, realized PnL, max drawdown, and whether the risk halt engaged. Tune `.env`, re-run, repeat. **Maker-only fill model, no queue/slippage — directional sanity check only, not a profit guarantee.**
+The 2nd arg is now **days of 1m history** (`≤ 90`). It paginates Binance klines
+backwards (1500-bar cap per call) so you can stress-test **7–30+ day windows**, not
+just a single 25-hour slice. A raw bar count `> 90` still works for backwards compat.
+
+```bash
+npm run backtest -- BTC 7 200    # ~7 days  (10,080 bars)
+npm run backtest -- SOL 14 200   # ~14 days (20,160 bars)
+npm run backtest -- BTC 30 200   # ~30 days (43,200 bars)
+```
+
+**Why multi-day matters:** a market maker bleeds in *trends*, not chop. A 1-day backtest
+is usually chop → false comfort. A 14-day window that contains a real selloff/rally is
+where you find out whether the anti-trend guard + inventory cap actually hold.
+
+Output adds a **TREND STRESS** block:
+
+- `peak inventory` — largest |position| reached (vs your cap). The real trend-risk number.
+- `worst unrealized` — deepest the open position went underwater (mark-to-market).
+- `guard-paused` / `at inv cap` — how often the defenses engaged.
+
+> ⚠️ **Read the right number.** The `guard-paused %` is **inflated in backtest** — it
+> feeds 1m closes into a 60s vol window (1 sample/min), so the drift slope is far noisier
+> than the per-second ticks the live bot sees. Judge trend risk by **peak inventory,
+> worst unrealized, and whether the halt fired** — not the pause %.
+
+Tune `.env`, re-run, repeat. **Maker-only fill model, no queue/slippage — directional sanity check only, not a profit guarantee.**
 
 ## Run live
 
