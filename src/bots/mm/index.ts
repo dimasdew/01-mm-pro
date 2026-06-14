@@ -22,6 +22,7 @@ import {
 	type CachedOrder,
 	cancelOrders,
 	flattenPosition,
+	TransientOrderError,
 	updateQuotes,
 } from "../../sdk/orders.js";
 import type { MidPrice } from "../../types.js";
@@ -234,9 +235,14 @@ export class MarketMaker {
 			this.risk?.applyFill(fill.side, fill.size, fill.price);
 
 			// Halt triggered by this fill (drawdown) => emergency flatten.
+			// Only latched halts flatten; transient ones auto-recover and must
+			// not dump the position.
 			if (this.risk?.isHalted()) {
-				void this.emergencyFlatten();
-				return;
+				const reason = this.risk.getHaltReason();
+				if (reason === "drawdown" || reason === "manual") {
+					void this.emergencyFlatten();
+					return;
+				}
 			}
 			if (this.positionTracker?.isCloseMode(fill.price)) {
 				this.cancelOrdersAsync();
@@ -461,12 +467,19 @@ export class MarketMaker {
 				return;
 			}
 
-			// Stale-feed circuit breaker.
+			// Stale-feed circuit breaker (auto-recovers when feeds are fresh).
 			this.risk.checkFeeds(this.feedAges());
 
-			// If halted, flatten any open position then bail.
+			// If halted, decide between flatten and pause:
+			//   - Latched halts (drawdown / manual) = real risk event => flatten
+			//     the position and stop until a manual restart.
+			//   - Transient halts (stale-feed / errors) auto-recover; do NOT
+			//     flatten (that would dump the position at a taker loss for a
+			//     momentary blip). Just skip this cycle and wait for recovery.
 			if (this.risk.isHalted()) {
-				if (!this.flattening) void this.emergencyFlatten();
+				const reason = this.risk.getHaltReason();
+				const latched = reason === "drawdown" || reason === "manual";
+				if (latched && !this.flattening) void this.emergencyFlatten();
 				return;
 			}
 
@@ -538,9 +551,20 @@ export class MarketMaker {
 			this.activeOrders = newOrders;
 			this.risk.recordSuccess();
 		} catch (err) {
-			log.error("Update error:", err);
-			this.activeOrders = [];
-			this.risk?.recordError();
+			// Transient order rejections (post-only would cross, cancel-of-gone,
+			// size-at-min) are NORMAL — log and clear orders, but DON'T count
+			// toward the consecutive-error halt. Only real failures (RPC down,
+			// auth, sequencer) trip recordError().
+			if (err instanceof TransientOrderError) {
+				this.activeOrders = [];
+				// A transient reject still means we acted, not that we're broken —
+				// treat it as a successful cycle for halt-tracking purposes.
+				this.risk?.recordSuccess();
+			} else {
+				log.error("Update error:", err);
+				this.activeOrders = [];
+				this.risk?.recordError();
+			}
 		} finally {
 			this.isUpdating = false;
 		}

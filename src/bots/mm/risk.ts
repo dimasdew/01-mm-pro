@@ -94,9 +94,16 @@ export class RiskManager {
 	}
 
 	// Feed staleness check. Pass max age (ms) of the freshest required feed.
+	// Auto-recovers: a `stale-feed` halt is a TRANSIENT condition (RPC lag, WS
+	// reconnect, network blip). Once every feed is fresh again, lift the halt
+	// and resume quoting instead of dying until a manual restart.
 	checkFeeds(feedAgesMs: number[]): void {
-		if (this.halted) return;
 		const stale = feedAgesMs.some((age) => age > this.config.staleFeedMs);
+		if (this.halted === "stale-feed") {
+			if (!stale) this.recover("stale-feed");
+			return;
+		}
+		if (this.halted) return;
 		if (stale) this.trip("stale-feed");
 	}
 
@@ -109,6 +116,21 @@ export class RiskManager {
 
 	recordSuccess(): void {
 		this.consecutiveErrors = 0;
+		// Auto-recover: an `errors` halt is transient (sequencer hiccup, RPC
+		// flake). A clean cycle proves we're healthy again — lift the halt.
+		if (this.halted === "errors") this.recover("errors");
+	}
+
+	// Lift a transient halt and resume quoting. Only `stale-feed` and `errors`
+	// auto-recover; `drawdown` and `manual` stay latched (real money / operator
+	// intent — those require a manual restart by design).
+	private recover(reason: Exclude<HaltReason, null>): void {
+		if (this.halted !== reason) return;
+		this.halted = null;
+		this.consecutiveErrors = 0;
+		log.warn(
+			`✅ RISK RECOVERED [${reason}] — condition cleared, resuming quoting.`,
+		);
 	}
 
 	private trip(reason: HaltReason): void {

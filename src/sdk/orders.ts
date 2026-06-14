@@ -12,6 +12,41 @@ import { log } from "../utils/logger.js";
 
 const MAX_ATOMIC_ACTIONS = 4;
 
+// Errors the exchange returns under NORMAL operation — a PostOnly order that
+// would cross, an order that can't rest, a cancel for an already-gone order.
+// These are NOT failures of the bot or its connectivity; they happen constantly
+// when the market moves while we're posting. They must NOT count toward the
+// consecutive-error halt, or the bot dies mid-trade for doing its job correctly.
+export class TransientOrderError extends Error {
+	constructor(message: string) {
+		super(message);
+		this.name = "TransientOrderError";
+	}
+}
+
+// Heuristic: does this exchange error look like a benign order rejection rather
+// than a real connectivity/auth/sequencer failure? Matches on the common
+// post-only / would-cross / reduce-only / already-cancelled signatures.
+function isTransientOrderError(err: unknown): boolean {
+	const msg = (
+		err instanceof Error ? err.message : String(err)
+	).toLowerCase();
+	return (
+		msg.includes("post") || // post-only would cross / post failed
+		msg.includes("cross") || // would cross the book
+		msg.includes("reduce") || // reduce-only rejection
+		msg.includes("would match") ||
+		msg.includes("immediately match") ||
+		msg.includes("not found") || // cancel of an order that already filled/cancelled
+		msg.includes("already") || // already cancelled / already filled
+		msg.includes("unknown order") ||
+		msg.includes("order does not exist") ||
+		msg.includes("too small") || // size below min — transient if size is at edge
+		msg.includes("min size") ||
+		msg.includes("min order")
+	);
+}
+
 // Cached order info
 export interface CachedOrder {
 	orderId: string;
@@ -96,7 +131,21 @@ async function executeAtomic(
 			`ATOMIC [${chunkIdx}/${totalChunks}]: ${chunk.map(formatAction).join(" ")}`,
 		);
 
-		const result = (await user.atomic(chunk)) as AtomicResult;
+		let result: AtomicResult;
+		try {
+			result = (await user.atomic(chunk)) as AtomicResult;
+		} catch (err) {
+			// Benign exchange rejections (post-only would cross, cancel of an
+			// already-gone order, size at min edge) are NORMAL market-making
+			// outcomes — re-throw as transient so the risk layer doesn't count
+			// them toward the consecutive-error halt.
+			if (isTransientOrderError(err)) {
+				const msg = err instanceof Error ? err.message : String(err);
+				log.warn(`ATOMIC rejected (transient, ignored): ${msg}`);
+				throw new TransientOrderError(msg);
+			}
+			throw err;
+		}
 		const placed = extractPlacedOrders(result, chunk);
 		allOrders.push(...placed);
 
