@@ -65,8 +65,10 @@ function simulate(
 	let peakPnl = 0;
 	let maxDrawdown = 0;
 
-	// 01.xyz: maker ~0bps, taker ~ small. We model a tiny round-trip cost.
+	// 01.xyz: maker ~0bps. Close-mode exits cross the book (taker IOC) so model a
+	// small taker cost on closing fills to avoid overstating PnL.
 	const makerFeeBps = 0;
+	const takerFeeBps = Number(process.env.BACKTEST_TAKER_FEE_BPS ?? 2);
 
 	for (const bar of klines) {
 		vol.addSample(bar.close);
@@ -92,15 +94,43 @@ function simulate(
 		const inCloseMode = Math.abs(invUsd) >= cfg.closeThresholdUsd;
 		const half = inCloseMode ? cfg.takeProfitBps : baseHalf;
 
-		const bidPrice = skewedFair * (1 - half / 10000);
-		const askPrice = skewedFair * (1 + half / 10000);
+		// Anti-trend guard (mirror of quoter.trendGuard). Disabled in close mode.
+		// Up-trend (drift>0) adversely selects the ASK => widen/pause ASK.
+		// Down-trend (drift<0) adversely selects the BID => widen/pause BID.
+		const driftBps = vol.getDriftBps();
+		let extraBidBps = 0;
+		let extraAskBps = 0;
+		let pauseBid = false;
+		let pauseAsk = false;
+		if (cfg.antiTrendGuard && !inCloseMode) {
+			const mag = Math.abs(driftBps);
+			if (mag >= cfg.trendDriftThresholdBps) {
+				const pause = mag >= cfg.trendPauseDriftBps;
+				const extra = Math.min(
+					(mag - cfg.trendDriftThresholdBps) * cfg.trendSpreadMult,
+					cfg.maxSpreadBps,
+				);
+				if (driftBps > 0) {
+					extraAskBps = extra;
+					pauseAsk = pause;
+				} else {
+					extraBidBps = extra;
+					pauseBid = pause;
+				}
+			}
+		}
+
+		const bidHalf = Math.min(half + extraBidBps, cfg.maxSpreadBps);
+		const askHalf = Math.min(half + extraAskBps, cfg.maxSpreadBps);
+		const bidPrice = skewedFair * (1 - bidHalf / 10000);
+		const askPrice = skewedFair * (1 + askHalf / 10000);
 
 		const atCap = Math.abs(invUsd) >= cfg.maxInventoryUsd;
 		const isLong = invBase > 0;
 
-		// allowed sides
-		const allowBid = inCloseMode ? !isLong : !(atCap && isLong);
-		const allowAsk = inCloseMode ? isLong : !(atCap && !isLong);
+		// allowed sides — guard pause gates a side independently of inventory state
+		const allowBid = !pauseBid && (inCloseMode ? !isLong : !(atCap && isLong));
+		const allowAsk = !pauseAsk && (inCloseMode ? isLong : !(atCap && !isLong));
 
 		const sizeBase = cfg.orderSizeUsd / fair;
 		const closeSize = Math.abs(invBase);
@@ -113,7 +143,9 @@ function simulate(
 			if (!filled) return;
 
 			fills++;
-			feesPaid += price * size * (makerFeeBps / 10000);
+			// Maker fee on normal quotes; taker fee on close-mode exits (cross IOC).
+			const feeBps = inCloseMode ? takerFeeBps : makerFeeBps;
+			feesPaid += price * size * (feeBps / 10000);
 			const signed = side === "bid" ? size : -size;
 			const prev = invBase;
 			const newBase = prev + signed;

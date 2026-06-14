@@ -60,12 +60,20 @@ export class FairPriceCalculator implements FairPriceProvider {
 		}
 	}
 
-	// Get samples within time window
+	// Get samples within time window.
+	// NOTE: samples are written into a CIRCULAR buffer indexed by `head`, so the
+	// physical slots [0..count) are NOT in chronological order once the buffer has
+	// wrapped (count === MAX_SAMPLES). The previous version iterated [0..count)
+	// and dropped/misread slots after wrap, silently shrinking the effective
+	// window. Median is order-independent, so we just scan every populated slot
+	// (0..count) and keep the ones still inside the time window — correct whether
+	// or not the buffer has wrapped.
 	private getValidSamples(): OffsetSample[] {
 		const cutoffSecond = Math.floor((Date.now() - this.config.windowMs) / 1000);
 		const valid: OffsetSample[] = [];
 
-		for (let i = 0; i < this.count; i++) {
+		const populated = Math.min(this.count, MAX_SAMPLES);
+		for (let i = 0; i < populated; i++) {
 			const sample = this.samples[i];
 			if (sample && sample.second > cutoffSecond) {
 				valid.push(sample);
