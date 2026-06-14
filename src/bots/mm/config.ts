@@ -111,9 +111,10 @@ export function loadConfig(
 	const base: MarketMakerConfig = {
 		symbol,
 
-		// Core
-		spreadBps: num("SPREAD_BPS", 8),
-		takeProfitBps: num("TAKE_PROFIT_BPS", 3), // was 0.1 — too small to cover fees
+		// Core — spread knobs are per-symbol (SPREAD_BPS_<SYM>, etc.) so tight/liquid
+		// coins quote thin and volatile coins quote wide, each tuned independently.
+		spreadBps: numForSymbol("SPREAD_BPS", symbol, 8),
+		takeProfitBps: numForSymbol("TAKE_PROFIT_BPS", symbol, 3), // was 0.1 — too small to cover fees
 		orderSizeUsd: num("ORDER_SIZE_USD", 200), // fallback only; used when MARGIN_PER_ENTRY_USD<=0
 		marginPerEntryUsd: num("MARGIN_PER_ENTRY_USD", 2), // default $2 margin/entry; notional auto-derived from market imf
 		warmupSeconds: num("WARMUP_SECONDS", 10),
@@ -135,8 +136,8 @@ export function loadConfig(
 		// Dynamic spread
 		dynamicSpread: bool("DYNAMIC_SPREAD", true),
 		volWindowSec: num("VOL_WINDOW_SEC", 60),
-		volSpreadMult: num("VOL_SPREAD_MULT", 1.0),
-		maxSpreadBps: num("MAX_SPREAD_BPS", 40),
+		volSpreadMult: numForSymbol("VOL_SPREAD_MULT", symbol, 1.0),
+		maxSpreadBps: numForSymbol("MAX_SPREAD_BPS", symbol, 40),
 
 		// Risk guards
 		maxDrawdownUsd: num("MAX_DRAWDOWN_USD", 50),
