@@ -28,9 +28,7 @@ export class TransientOrderError extends Error {
 // than a real connectivity/auth/sequencer failure? Matches on the common
 // post-only / would-cross / reduce-only / already-cancelled signatures.
 function isTransientOrderError(err: unknown): boolean {
-	const msg = (
-		err instanceof Error ? err.message : String(err)
-	).toLowerCase();
+	const msg = (err instanceof Error ? err.message : String(err)).toLowerCase();
 	return (
 		msg.includes("post") || // post-only would cross / post failed
 		msg.includes("cross") || // would cross the book
@@ -200,21 +198,30 @@ export async function updateQuotes(
 	const ordersToCancel: CachedOrder[] = [];
 	const quotesToPlace: Quote[] = [];
 
-	// For each new quote, check if matching order exists
+	// Track kept orders by orderId, not object identity. `includes(order)` did a
+	// reference-equality check that breaks the moment an order object is remapped
+	// on a sync (e.g. rebuilt from API) — a kept order would fail the identity
+	// test and get cancelled, churning the book. orderId is the stable key.
+	// We also mark each order consumed so two identical quotes can't both claim
+	// the same resting order (which would leave a stale order uncancelled).
+	const keptIds = new Set<string>();
+
+	// For each new quote, check if a not-yet-claimed matching order exists.
 	for (const quote of newQuotes) {
-		const matchingOrder = currentOrders.find((o) =>
-			orderMatchesQuote(o, quote),
+		const matchingOrder = currentOrders.find(
+			(o) => !keptIds.has(o.orderId) && orderMatchesQuote(o, quote),
 		);
 		if (matchingOrder) {
 			keptOrders.push(matchingOrder);
+			keptIds.add(matchingOrder.orderId);
 		} else {
 			quotesToPlace.push(quote);
 		}
 	}
 
-	// Cancel orders that don't match any new quote
+	// Cancel orders that weren't claimed by any new quote.
 	for (const order of currentOrders) {
-		if (!keptOrders.includes(order)) {
+		if (!keptIds.has(order.orderId)) {
 			ordersToCancel.push(order);
 		}
 	}

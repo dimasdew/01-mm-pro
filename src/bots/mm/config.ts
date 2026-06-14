@@ -31,6 +31,9 @@ export interface MarketMakerConfig {
 	readonly maxDrawdownUsd: number; // Kill switch: halt+flatten if session PnL <= -this
 	readonly staleFeedMs: number; // Halt quoting if any feed older than this
 	readonly maxConsecutiveErrors: number; // Halt after N consecutive update errors
+	readonly flattenSlippageBps: number; // Base aggression of emergency flatten IOC past BBO (bps)
+	readonly flattenMaxSlippageBps: number; // Ceiling for escalated flatten retries (bps)
+	readonly flattenRetries: number; // Max IOC attempts before giving up on a flatten
 
 	// --- Funding-aware (NEW) ---
 	readonly fundingAware: boolean; // Bias quotes against unfavorable funding
@@ -143,6 +146,9 @@ export function loadConfig(
 		maxDrawdownUsd: num("MAX_DRAWDOWN_USD", 50),
 		staleFeedMs: num("STALE_FEED_MS", 5000),
 		maxConsecutiveErrors: num("MAX_CONSECUTIVE_ERRORS", 5),
+		flattenSlippageBps: num("FLATTEN_SLIPPAGE_BPS", 50),
+		flattenMaxSlippageBps: num("FLATTEN_MAX_SLIPPAGE_BPS", 300),
+		flattenRetries: num("FLATTEN_RETRIES", 4),
 
 		// Funding
 		fundingAware: bool("FUNDING_AWARE", true),

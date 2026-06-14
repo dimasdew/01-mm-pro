@@ -49,6 +49,17 @@ export class PositionTracker {
 		this.isRunning = false;
 	}
 
+	// One-shot synchronous re-sync from the venue. Used by the emergency-flatten
+	// retry loop to read the freshest position after each IOC attempt instead of
+	// waiting for the background sync interval to tick.
+	async forceSync(
+		user: NordUser,
+		accountId: number,
+		marketId: number,
+	): Promise<void> {
+		await this.syncFromServer(user, accountId, marketId);
+	}
+
 	private async syncLoop(
 		user: NordUser,
 		accountId: number,

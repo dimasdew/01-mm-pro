@@ -140,9 +140,36 @@ export class MarketMaker {
 		this.client = this.sharedClient ?? (await createZoClient(this.privateKey));
 		const { nord } = this.client;
 
-		const market = nord.markets.find((m) =>
-			m.symbol.toUpperCase().startsWith(this.config.symbol.toUpperCase()),
-		);
+		// Resolve market by symbol. `startsWith` is ambiguous — "BTC" prefixes
+		// both "BTCUSD" and a hypothetical "BTCUSDT"/"BTC1000", silently picking
+		// whichever the venue lists first. Match deterministically instead:
+		//   1) exact symbol match (case-insensitive)
+		//   2) exact base match: strip the venue's quote/suffix and compare
+		//      (BTC == BTCUSD, BTC == BTC-PERP)
+		//   3) unambiguous prefix: exactly ONE market starts with the symbol
+		// If a prefix matches more than one market, refuse rather than guess.
+		const want = this.config.symbol.toUpperCase();
+		const norm = (s: string) =>
+			s
+				.toUpperCase()
+				.replace(/[-_]?PERP$/i, "")
+				.replace(/USDC?T?$/i, "");
+		let market =
+			nord.markets.find((m) => m.symbol.toUpperCase() === want) ??
+			nord.markets.find((m) => norm(m.symbol) === want);
+		if (!market) {
+			const prefixHits = nord.markets.filter((m) =>
+				m.symbol.toUpperCase().startsWith(want),
+			);
+			if (prefixHits.length === 1) {
+				market = prefixHits[0];
+			} else if (prefixHits.length > 1) {
+				const ambiguous = prefixHits.map((m) => m.symbol).join(", ");
+				throw new Error(
+					`Market "${this.config.symbol}" is ambiguous — matches: ${ambiguous}. Use the full symbol.`,
+				);
+			}
+		}
 		if (!market) {
 			const available = nord.markets.map((m) => m.symbol).join(", ");
 			throw new Error(
@@ -419,29 +446,70 @@ export class MarketMaker {
 				return;
 			}
 
-			// Aggressive limit past the BBO (+/-50bps) so the IOC sweeps and fills.
-			// long  => SELL into the bid, price below bestBid
-			// short => BUY  into the ask, price above bestAsk
-			const SLIPPAGE_BPS = 50;
-			const ref = baseSize > 0 ? bbo.bestBid : bbo.bestAsk;
-			const adj =
-				baseSize > 0
-					? ref * (1 - SLIPPAGE_BPS / 10000)
-					: ref * (1 + SLIPPAGE_BPS / 10000);
-			const limitPrice = new Decimal(adj.toFixed(this.priceDecimals));
+			// Escalating reduce-only IOC sweep. A single fixed-50bps IOC silently
+			// no-fills when the market has gapped or thinned past 50bps — leaving
+			// a position open on a HALTED bot that's bleeding (the kill switch only
+			// trips when losing, so a stuck flatten is the worst case). Retry with
+			// progressively wider aggression up to flattenMaxSlippageBps, re-reading
+			// the freshest position from the venue between attempts.
+			const baseBps = this.config.flattenSlippageBps;
+			const maxBps = Math.max(baseBps, this.config.flattenMaxSlippageBps);
+			const retries = Math.max(1, this.config.flattenRetries);
+			const { user, accountId } = this.requireClient();
 
-			const submitted = await flattenPosition(
-				this.client.user,
-				this.marketId,
-				this.activeOrders,
-				new Decimal(baseSize),
-				limitPrice,
-			);
-			this.activeOrders = [];
+			let remaining = baseSize; // signed; refreshed each pass
+			let lastBbo = bbo;
+			let closed = false;
 
-			if (submitted) {
-				log.info(
-					`Emergency flatten submitted: ${baseSize > 0 ? "SOLD" : "BOUGHT"} ${Math.abs(baseSize)} @ ~${limitPrice.toString()}`,
+			for (let attempt = 0; attempt < retries; attempt++) {
+				if (Math.abs(remaining) < 1e-8) {
+					closed = true;
+					break;
+				}
+				// Ramp slippage linearly from base -> max across the retries.
+				const frac = retries > 1 ? attempt / (retries - 1) : 0;
+				const slipBps = baseBps + (maxBps - baseBps) * frac;
+
+				// long  => SELL into the bid, price below bestBid
+				// short => BUY  into the ask, price above bestAsk
+				const ref = remaining > 0 ? lastBbo.bestBid : lastBbo.bestAsk;
+				const adj =
+					remaining > 0
+						? ref * (1 - slipBps / 10000)
+						: ref * (1 + slipBps / 10000);
+				const limitPrice = new Decimal(adj.toFixed(this.priceDecimals));
+
+				log.warn(
+					`Emergency flatten attempt ${attempt + 1}/${retries}: ${
+						remaining > 0 ? "SELL" : "BUY"
+					} ${Math.abs(remaining)} @ ~${limitPrice.toString()} (${slipBps.toFixed(0)}bps)`,
+				);
+
+				await flattenPosition(
+					user,
+					this.marketId,
+					attempt === 0 ? this.activeOrders : [],
+					new Decimal(remaining),
+					limitPrice,
+				);
+				this.activeOrders = [];
+
+				// Re-read the venue to see what actually filled before escalating.
+				await this.positionTracker.forceSync(user, accountId, this.marketId);
+				remaining = this.positionTracker.getBaseSize();
+				lastBbo = this.orderbookStream?.getBBO() ?? lastBbo;
+
+				if (Math.abs(remaining) < 1e-8) {
+					closed = true;
+					break;
+				}
+			}
+
+			if (closed) {
+				log.info("Emergency flatten complete: position is flat.");
+			} else {
+				log.error(
+					`⚠️ Emergency flatten INCOMPLETE after ${retries} attempts — residual ${remaining}. Manual intervention may be required.`,
 				);
 			}
 		} catch (err) {
